@@ -23,6 +23,7 @@ use windows::{
 };
 
 
+
 // 系统关键进程白名单（防止误杀导致系统崩溃）
 const PROTECTED_PROCESSES: &[&str] = &[
     // 系统核心进程
@@ -66,9 +67,45 @@ fn main() -> Result<()> {
 
     clear_virtual_memory()?;
     clean_system_caches();
+    dynamic_clock_boost(true);
 
     println!("内存清理完成");
     Ok(())
+}
+
+/// 动态调整CPU时钟速度
+fn dynamic_clock_boost(enable: bool) {
+    unsafe {
+        use windows::Win32::{
+            Foundation::GetLastError,
+            System::Threading::{
+                GetCurrentProcess, SetProcessInformation, 
+                PROCESS_INFORMATION_CLASS,
+                PROCESS_POWER_THROTTLING_STATE,
+                PROCESS_POWER_THROTTLING_EXECUTION_SPEED, 
+                PROCESS_POWER_THROTTLING_CURRENT_VERSION
+            }
+        };
+
+        // 使用Windows API定义的枚举值
+        const PROCESS_POWER_THROTTLING: PROCESS_INFORMATION_CLASS = 
+            PROCESS_INFORMATION_CLASS(0x12); // 0x12是ProcessPowerThrottling的实际值[9,10](@ref)
+
+        let mut throttling_state = PROCESS_POWER_THROTTLING_STATE {
+            Version: PROCESS_POWER_THROTTLING_CURRENT_VERSION,
+            ControlMask: if enable { PROCESS_POWER_THROTTLING_EXECUTION_SPEED } else { 0 },
+            StateMask: if enable { PROCESS_POWER_THROTTLING_EXECUTION_SPEED } else { 0 },
+        };
+        
+        SetProcessInformation(
+            GetCurrentProcess(),
+            PROCESS_POWER_THROTTLING, // 使用定义的常量
+            &mut throttling_state as *mut _ as _,
+            std::mem::size_of::<PROCESS_POWER_THROTTLING_STATE>() as _,
+        ).map_err(|_e| {
+            eprintln!("SetProcessInformation failed: {:?}", GetLastError());
+        }).ok();
+    }
 }
 
 
