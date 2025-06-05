@@ -1,4 +1,6 @@
 
+use std::path::Path;
+
 use windows::{
     Win32::{
         Foundation::CloseHandle,
@@ -63,9 +65,48 @@ fn main() -> Result<()> {
     compact_system_memory()?;
 
     clear_virtual_memory()?;
+    clean_system_caches();
 
     println!("内存清理完成");
     Ok(())
+}
+
+
+fn clean_system_caches() {
+    // 缩略图缓存
+    let thumbnail_cache = Path::new("C:\\Users\\User\\AppData\\Local\\Microsoft\\Windows\\Explorer")
+        .join("thumbcache*.db");
+    clean_files(thumbnail_cache);
+
+    // DNS 缓存（已移除 unsafe）
+    std::process::Command::new("cmd")
+        .args(&["/C", "ipconfig", "/flushdns"])
+        .spawn()
+        .expect("无法刷新DNS缓存");
+
+    // 预取文件
+    let prefetch_files = Path::new("C:\\Windows\\Prefetch").join("*.pf");
+    clean_files(prefetch_files);
+}
+
+/// 清理指定模式的文件
+fn clean_files(path_pattern: std::path::PathBuf) {
+    if let Some(parent) = path_pattern.parent() {
+        if let Some(file_name) = path_pattern.file_name() {
+            if let Some(file_name_str) = file_name.to_str() {
+                if let Ok(entries) = std::fs::read_dir(parent) {
+                    // 使用闭包处理 Result
+                    for entry in entries.filter_map(|res| res.ok()) {
+                        if let Some(name) = entry.file_name().to_str() {
+                            if name.contains(file_name_str.trim_matches('*')) {
+                                let _ = std::fs::remove_file(entry.path());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 /// 新增：清理虚拟内存功能
 fn clear_virtual_memory() -> Result<()> {
