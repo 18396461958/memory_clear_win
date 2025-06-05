@@ -91,13 +91,14 @@ fn optimize_network() -> Result<()> {
         let result = QOSCreateHandle(&version, &mut qos_handle);
         if result.as_bool() {
             // 4. 使用QOSSetFlow替代QOSSetPriorityClass
-            let flow_id = QOS_FLOWID(0); // 系统自动生成FlowID
+            let flow_id: u32 = 0; // 系统自动生成 FlowID
             let priority = QOS_PACKET_PRIORITY {
                 ConformantDSCPValue: 46, // DSCP EF(加速转发)值
                 NonConformantDSCPValue: 0,
                 ConformantL2Value: 0,
                 NonConformantL2Value: 0,
             };
+            use windows::Win32::Networking::QoS::QOSSetFlow;
             
             QOSSetFlow(
                 qos_handle,
