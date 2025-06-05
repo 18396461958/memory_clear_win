@@ -1,4 +1,4 @@
-use sysinfo::System;
+
 use windows::{
     Win32::{
         Foundation::CloseHandle,
@@ -9,15 +9,14 @@ use windows::{
             },
             Memory::{GetProcessHeap, HEAP_NO_SERIALIZE, HeapCompact, SetProcessWorkingSetSizeEx},
             Threading::{
-                GetCurrentProcess, IDLE_PRIORITY_CLASS, OpenProcess, PROCESS_QUERY_INFORMATION,
-                PROCESS_SET_INFORMATION, PROCESS_TERMINATE, SetPriorityClass, TerminateProcess,
+                GetCurrentProcess, OpenProcess, PROCESS_QUERY_INFORMATION,
+                 PROCESS_TERMINATE, TerminateProcess,
             },
         },
     },
     core::Result,
 }; // 添加sysinfo用于CPU监控
 
-const CPU_THRESHOLD: f32 = 80.0; // CPU占用率阈值(80%)
 
 // 系统关键进程白名单（防止误杀导致系统崩溃）
 const PROTECTED_PROCESSES: &[&str] = &[
@@ -42,23 +41,10 @@ const PROTECTED_PROCESSES: &[&str] = &[
     "WeChatWeb.exe", // 微信Web进程
     "QQ.exe",        // QQ
     "DingTalk.exe",  // 钉钉
-    // 办公软件
-    "WINWORD.EXE",  // Word
-    "EXCEL.EXE",    // Excel
-    "POWERPNT.EXE", // PowerPoint
-    "OUTLOOK.EXE",  // Outlook
     // 多媒体工具
-    "Photoshop.exe",      // Photoshop
-    "Adobe Premiere.exe", // Premiere Pro
-    "Spotify.exe",        // Spotify
-    // 系统工具
-    "explorer.exe",      // 文件资源管理器
-    "SearchIndexer.exe", // Windows搜索
 ];
 
 fn main() -> Result<()> {
-    // 1. 清理高CPU占用进程
-    terminate_high_cpu_processes()?;
 
     // 1. 结束非关键进程
     terminate_non_critical_processes()?;
@@ -141,38 +127,3 @@ fn is_protected(process_name: &str) -> bool {
 }
 
 
-/// 清理高CPU占用进程
-fn terminate_high_cpu_processes() -> Result<()> {
-    let mut sys = System::new();
-    sys.refresh_all();
-
-    for (pid, process) in sys.processes() {
-        let process_name = process.name();
-        let cpu_usage = process.cpu_usage();
-
-        if cpu_usage > CPU_THRESHOLD
-            && !PROTECTED_PROCESSES.iter().any(|&name| name == process_name)
-        {
-            println!("终止高CPU进程: {:?} ({}%)", process_name, cpu_usage);
-
-            // 先尝试降低优先级
-            if let Ok(handle) =
-                unsafe { OpenProcess(PROCESS_SET_INFORMATION, false, pid.as_u32() as u32) }
-            {
-                unsafe {
-                    SetPriorityClass(handle, IDLE_PRIORITY_CLASS).unwrap();
-                }
-                unsafe { let _ = CloseHandle(handle); };
-            }
-
-            // 若仍高占用则终止
-            std::thread::sleep(std::time::Duration::from_secs(2));
-            if let Some(p) = sys.process(*pid) {
-                if p.cpu_usage() > CPU_THRESHOLD {
-                    terminate_process(pid.as_u32() as u32);
-                }
-            }
-        }
-    }
-    Ok(())
-}
