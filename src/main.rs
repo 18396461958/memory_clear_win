@@ -1,4 +1,4 @@
-// main.rs
+use sysinfo::System;
 use windows::{
     Win32::{
         Foundation::CloseHandle,
@@ -9,13 +9,15 @@ use windows::{
             },
             Memory::{GetProcessHeap, HEAP_NO_SERIALIZE, HeapCompact, SetProcessWorkingSetSizeEx},
             Threading::{
-                GetCurrentProcess, OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_TERMINATE,
-                TerminateProcess,
+                GetCurrentProcess, IDLE_PRIORITY_CLASS, OpenProcess, PROCESS_QUERY_INFORMATION,
+                PROCESS_SET_INFORMATION, PROCESS_TERMINATE, SetPriorityClass, TerminateProcess,
             },
         },
     },
     core::Result,
-};
+}; // 添加sysinfo用于CPU监控
+
+const CPU_THRESHOLD: f32 = 80.0; // CPU占用率阈值(80%)
 
 // 系统关键进程白名单（防止误杀导致系统崩溃）
 const PROTECTED_PROCESSES: &[&str] = &[
@@ -26,41 +28,37 @@ const PROTECTED_PROCESSES: &[&str] = &[
     "csrss.exe",
     "lsass.exe",
     "winlogon.exe",
-    
     // 开发工具
-    "Code.exe",          // VS Code主进程[12,13](@ref)
-    "devenv.exe",        // Visual Studio
-    "pycharm64.exe",     // PyCharm
-    
+    "Code.exe",      // VS Code主进程[12,13](@ref)
+    "devenv.exe",    // Visual Studio
+    "pycharm64.exe", // PyCharm
     // 浏览器
-    "chrome.exe",        // Chrome浏览器主进程[9,11](@ref)
-    "msedge.exe",        // Edge浏览器
-    "firefox.exe",       // Firefox
-    
+    "chrome.exe",  // Chrome浏览器主进程[9,11](@ref)
+    "msedge.exe",  // Edge浏览器
+    "firefox.exe", // Firefox
     // 通讯软件
-    "WeChat.exe",        // 微信主进程[7,8](@ref)
-    "WeChatWeb.exe",     // 微信Web进程[7,8](@ref)
-    "QQ.exe",            // QQ
-    "DingTalk.exe",      // 钉钉
-    
+    "WeChat.exe",    // 微信主进程
+    "WeChatWeb.exe", // 微信Web进程
+    "QQ.exe",        // QQ
+    "DingTalk.exe",  // 钉钉
     // 办公软件
-    "WINWORD.EXE",       // Word
-    "EXCEL.EXE",         // Excel
-    "POWERPNT.EXE",      // PowerPoint
-    "OUTLOOK.EXE",       // Outlook
-    
+    "WINWORD.EXE",  // Word
+    "EXCEL.EXE",    // Excel
+    "POWERPNT.EXE", // PowerPoint
+    "OUTLOOK.EXE",  // Outlook
     // 多媒体工具
-    "Photoshop.exe",     // Photoshop
-    "Adobe Premiere.exe",// Premiere Pro
-    "Spotify.exe",       // Spotify
-    
+    "Photoshop.exe",      // Photoshop
+    "Adobe Premiere.exe", // Premiere Pro
+    "Spotify.exe",        // Spotify
     // 系统工具
     "explorer.exe",      // 文件资源管理器
     "SearchIndexer.exe", // Windows搜索
 ];
 
-
 fn main() -> Result<()> {
+    // 1. 清理高CPU占用进程
+    terminate_high_cpu_processes()?;
+
     // 1. 结束非关键进程
     terminate_non_critical_processes()?;
 
@@ -81,8 +79,8 @@ fn terminate_non_critical_processes() -> Result<()> {
         if Process32First(snapshot, &mut entry).is_ok() {
             loop {
                 let process_name = decode_process_name(&entry);
-                if !PROTECTED_PROCESSES.contains(&process_name.as_str()) {
-                    terminate_process(entry.th32ProcessID);
+                if !is_protected(&process_name) {
+                terminate_process(entry.th32ProcessID);
                 }
 
                 if Process32Next(snapshot, &mut entry).is_err() {
@@ -126,9 +124,54 @@ fn compact_system_memory() -> Result<()> {
 
 /// 解码进程名称
 fn decode_process_name(entry: &PROCESSENTRY32) -> String {
-    entry
-        .szExeFile
+    entry.szExeFile
         .iter()
-        .filter_map(|&c| if c == 0 { None } else { Some(c as u8 as char) })
+        .take_while(|&&c| c != 0) // 遇到空字符停止
+        .map(|&c| c as u8 as char)
         .collect::<String>()
+}
+fn is_protected(process_name: &str) -> bool {
+    PROTECTED_PROCESSES.iter().any(|&name| {
+        // 精确匹配主进程名（忽略大小写）
+        process_name.eq_ignore_ascii_case(name) 
+        // 额外匹配浏览器子进程（如 chrome.exe:1234）
+        || (name == "chrome.exe" && process_name.starts_with("chrome.exe"))
+    })
+}
+
+
+/// 清理高CPU占用进程
+fn terminate_high_cpu_processes() -> Result<()> {
+    let mut sys = System::new();
+    sys.refresh_all();
+
+    for (pid, process) in sys.processes() {
+        let process_name = process.name();
+        let cpu_usage = process.cpu_usage();
+
+        if cpu_usage > CPU_THRESHOLD
+            && !PROTECTED_PROCESSES.iter().any(|&name| name == process_name)
+        {
+            println!("终止高CPU进程: {:?} ({}%)", process_name, cpu_usage);
+
+            // 先尝试降低优先级
+            if let Ok(handle) =
+                unsafe { OpenProcess(PROCESS_SET_INFORMATION, false, pid.as_u32() as u32) }
+            {
+                unsafe {
+                    SetPriorityClass(handle, IDLE_PRIORITY_CLASS).unwrap();
+                }
+                unsafe { let _ = CloseHandle(handle); };
+            }
+
+            // 若仍高占用则终止
+            std::thread::sleep(std::time::Duration::from_secs(2));
+            if let Some(p) = sys.process(*pid) {
+                if p.cpu_usage() > CPU_THRESHOLD {
+                    terminate_process(pid.as_u32() as u32);
+                }
+            }
+        }
+    }
+    Ok(())
 }
