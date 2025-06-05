@@ -12,4 +12,3 @@ windows = { version = "0.61.1", features = [
     "Win32_System_SystemServices",
 ] }
 sysinfo = "0.35.2" # CPU监控
-nvml-wrapper = "0.11.0" # GPU监控(需NVIDIA驱动)
