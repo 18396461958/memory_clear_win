@@ -44,7 +44,13 @@ const PROTECTED_PROCESSES: &[&str] = &[
     "QQ.exe",        // QQ
     "DingTalk.exe",  // 钉钉
     "Steam++.exe",
-    "Steam++.Accelerator.exe"
+    "Steam++.Accelerator.exe",
+    "conhost.exe",
+    "cmd.exe",
+    "rust-analyzer.exe",
+    "rust-analyzer-proc-macro-srv.exe"
+
+
     // 多媒体工具
 ];
 
