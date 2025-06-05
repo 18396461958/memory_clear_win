@@ -43,6 +43,8 @@ const PROTECTED_PROCESSES: &[&str] = &[
     "WeChatWeb.exe", // 微信Web进程
     "QQ.exe",        // QQ
     "DingTalk.exe",  // 钉钉
+    "Steam++.exe",
+    "Steam++.Accelerator.exe"
     // 多媒体工具
 ];
 
