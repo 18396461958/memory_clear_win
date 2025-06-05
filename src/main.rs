@@ -1,5 +1,5 @@
 
-use std::path::Path;
+use std::{path::Path, ptr};
 
 use windows::{
     Win32::{
@@ -21,7 +21,10 @@ use windows::{
     },
     core::Result,
 };
-
+use windows::{
+    Win32::NetworkManagement::QoS::*,
+    Win32::Foundation::{HANDLE},
+};
 
 
 // 系统关键进程白名单（防止误杀导致系统崩溃）
@@ -70,6 +73,45 @@ fn main() -> Result<()> {
     dynamic_clock_boost(true);
 
     println!("内存清理完成");
+    Ok(())
+}
+/// 优化网络流量
+fn optimize_network() -> Result<()> {
+    unsafe {
+        // 1. 声明qos_handle变量
+        let mut qos_handle = HANDLE::default();
+        
+        // 2. 使用QOS_VERSION结构体（非QOS_VERSION_INFO）
+        let version = QOS_VERSION {
+            MajorVersion: 1,
+            MinorVersion: 0,
+        };
+        
+        // 3. 处理BOOL返回值
+        let result = QOSCreateHandle(&version, &mut qos_handle);
+        if result.as_bool() {
+            // 4. 使用QOSSetFlow替代QOSSetPriorityClass
+            let flow_id = QOS_FLOWID(0); // 系统自动生成FlowID
+            let priority = QOS_PACKET_PRIORITY {
+                ConformantDSCPValue: 46, // DSCP EF(加速转发)值
+                NonConformantDSCPValue: 0,
+                ConformantL2Value: 0,
+                NonConformantL2Value: 0,
+            };
+            
+            QOSSetFlow(
+                qos_handle,
+                flow_id,
+                QOS_SET_FLOW::QOSSetOutgoingPacketPriority,
+                std::mem::size_of::<QOS_PACKET_PRIORITY>() as u32,
+                &priority as *const _ as _,
+                0,
+                ptr::null_mut(),
+            )?;
+        } else {
+            return Err(std::io::Error::last_os_error().into());
+        }
+    }
     Ok(())
 }
 
