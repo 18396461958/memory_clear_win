@@ -31,7 +31,6 @@ const PROTECTED_PROCESSES: &[&str] = &[
     "Code.exe",      // VS Code主进程[12,13]
     "devenv.exe",    // Visual Studio
     "pycharm64.exe", // PyCharm
-    "Steam++.exe",
     // 浏览器
     "chrome.exe",  // Chrome浏览器主进程[9,11]
     "msedge.exe",  // Edge浏览器
