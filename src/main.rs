@@ -1,5 +1,5 @@
 
-use std::path::Path;
+use std::{fs, path::Path, time::{Duration, SystemTime}};
 
 use windows::{
     Win32::{
@@ -39,6 +39,8 @@ const PROTECTED_PROCESSES: &[&str] = &[
     "msedge.exe",  // Edge浏览器
     "firefox.exe", // Firefox
     // 通讯软件
+    "Weixin.exe",
+    "WeChatAppEx.exe",
     "WeChat.exe",    // 微信主进程
     "WeChatWeb.exe", // 微信Web进程
     "QQ.exe",        // QQ
@@ -65,6 +67,7 @@ fn main() -> Result<()> {
 
     clear_virtual_memory()?;
     clean_system_caches();
+    clean_c_drive()?;
     dynamic_clock_boost(true);
 
     println!("内存清理完成");
@@ -265,5 +268,126 @@ fn is_protected(process_name: &str) -> bool {
         || (name == "chrome.exe" && process_name.starts_with("chrome.exe"))
     })
 }
+
+/// 综合C盘清理入口
+fn clean_c_drive() -> Result<()> {
+    clean_temp_folders()?;             // 临时文件夹
+    clean_thumbnail_cache()?;           // 缩略图缓存
+    clean_browser_caches()?;            // 浏览器缓存
+    clean_windows_update_cache()?;      // Windows更新缓存
+    clean_old_logs()?;                  // 旧日志文件
+    Ok(())
+}
+
+/// 1. 清理临时文件夹
+fn clean_temp_folders() -> Result<()> {
+    let temp_paths = vec![
+        Path::new("C:\\Windows\\Temp"),
+        Path::new("C:\\Users\\User\\AppData\\Local\\Temp")
+    ];
+
+    for path in temp_paths {
+        if path.exists() {
+            clean_directory_by_age(path, 7)?; // 删除7天前的文件
+        }
+    }
+    Ok(())
+}
+
+/// 2. 清理缩略图缓存
+fn clean_thumbnail_cache() -> Result<()> {
+    let cache_path = Path::new("C:\\Users\\User\\AppData\\Local\\Microsoft\\Windows\\Explorer");
+    if cache_path.exists() {
+        for entry in fs::read_dir(cache_path)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.is_file() && path.extension().unwrap_or_default() == "db" {
+                fs::remove_file(path)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// 3. 浏览器缓存清理
+fn clean_browser_caches() -> Result<()> {
+    let browsers = vec![
+        "C:\\Users\\User\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\Cache",
+        "C:\\Users\\User\\AppData\\Local\\Microsoft\\Edge\\User Data\\Default\\Cache",
+        "C:\\Users\\User\\AppData\\Roaming\\Mozilla\\Firefox\\Profiles"
+    ];
+
+    for path_str in browsers {
+        let path = Path::new(path_str);
+        if path.exists() {
+            clean_directory_by_age(path, 30)?; // 删除30天前的缓存
+        }
+    }
+    Ok(())
+}
+
+/// 4. Windows更新缓存清理
+fn clean_windows_update_cache() -> Result<()> {
+    let update_path = Path::new("C:\\Windows\\SoftwareDistribution\\Download");
+    if update_path.exists() {
+        clean_directory_contents(update_path)?; // 立即清理无需判断时间
+    }
+    Ok(())
+}
+
+/// 5. 旧日志清理
+fn clean_old_logs() -> Result<()> {
+    let log_paths = vec![
+        Path::new("C:\\Windows\\Logs"),
+        Path::new("C:\\Windows\\System32\\LogFiles"),
+        Path::new("C:\\inetpub\\logs\\LogFiles") // IIS日志
+    ];
+
+    for path in log_paths {
+        if path.exists() {
+            clean_directory_by_age(path, 90)?; // 删除90天前的日志
+        }
+    }
+    Ok(())
+}
+
+/// 核心：按时间清理目录
+fn clean_directory_by_age(dir: &Path, days: u64) -> Result<()> {
+    let cutoff = SystemTime::now() - Duration::from_secs(days * 86400);
+    
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        
+        if let Ok(metadata) = fs::metadata(&path) {
+            let modified = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+            
+            if modified < cutoff {
+                if path.is_dir() {
+                    fs::remove_dir_all(&path)?;
+                } else {
+                    fs::remove_file(&path)?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// 立即清理目录内容
+fn clean_directory_contents(dir: &Path) -> Result<()> {
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        
+        if path.is_dir() {
+            fs::remove_dir_all(&path)?;
+        } else {
+            fs::remove_file(&path)?;
+        }
+    }
+    Ok(())
+}
+
 
 
