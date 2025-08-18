@@ -1,5 +1,5 @@
 
-use std::{path::Path};
+use std::path::Path;
 
 use windows::{
     Win32::{
