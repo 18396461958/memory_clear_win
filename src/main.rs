@@ -34,9 +34,6 @@ const PROTECTED_PROCESSES: &[&str] = &[
     "lsass.exe",
     "winlogon.exe",
     // 开发工具
-    "Code.exe",      // VS Code主进程
-    "devenv.exe",    // Visual Studio
-    "pycharm64.exe", // PyCharm
     // 浏览器
     "chrome.exe",  // Chrome浏览器主进程
     "msedge.exe",  // Edge浏览器
