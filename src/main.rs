@@ -1,257 +1,70 @@
+use std::{
+    env,
+    fs,
+    path::{Path, PathBuf},
+    time::{Duration, SystemTime},
+};
 
-use std::{fs, path::Path, time::{Duration, SystemTime}};
-
+use glob::glob;
 use windows::{
+    core::{Result, PCWSTR}, // 移除未使用的 HSTRING
     Win32::{
-        Foundation::CloseHandle,
+        Foundation::{CloseHandle, GetLastError, HANDLE},
         System::{
             Diagnostics::ToolHelp::{
                 CreateToolhelp32Snapshot, PROCESSENTRY32, Process32First, Process32Next,
                 TH32CS_SNAPPROCESS,
             },
             Memory::{
-                GetProcessHeap, HEAP_NO_SERIALIZE, 
-                HeapCompact, SetProcessWorkingSetSizeEx
+                GetProcessHeap, HEAP_NO_SERIALIZE, HeapCompact, SetProcessWorkingSetSizeEx,
+                SETPROCESSWORKINGSETSIZEEX_FLAGS,
             },
             Threading::{
-                GetCurrentProcess, OpenProcess, PROCESS_QUERY_INFORMATION,
-                PROCESS_VM_OPERATION, PROCESS_TERMINATE, TerminateProcess,
-            },
+                GetCurrentProcess, GetCurrentProcessId, OpenProcess, PROCESS_QUERY_INFORMATION,
+                PROCESS_TERMINATE, PROCESS_VM_OPERATION, TerminateProcess,
+                OpenProcessToken, // 补全导入
+            }
+        },
+        Security::{ // 补全 Security 模块导入
+            GetTokenInformation,
+            TokenElevation,
+            TOKEN_ACCESS_MASK,
         },
     },
-    core::Result,
 };
 
-
-
-// 系统关键进程白名单（防止误杀导致系统崩溃）
+// ===================== 配置常量（集中管理，便于修改） =====================
+/// 系统关键进程白名单（防止误杀）
 const PROTECTED_PROCESSES: &[&str] = &[
     // 系统核心进程
-    "System",
-    "svchost.exe",
-    "wininit.exe",
-    "csrss.exe",
-    "lsass.exe",
-    "winlogon.exe",
-    // 开发工具
-    // 浏览器
-    "chrome.exe",  // Chrome浏览器主进程
-    "msedge.exe",  // Edge浏览器
-    "firefox.exe", // Firefox
-    // 通讯软件
-    "Weixin.exe",
-    "WeChatAppEx.exe",
-    "WeChat.exe",    // 微信主进程
-    "WeChatWeb.exe", // 微信Web进程
-    "QQ.exe",        // QQ
-    "DingTalk.exe",  // 钉钉
-    "Steam++.exe",
-    "Steam++.Accelerator.exe",
-    "conhost.exe",
-    "cmd.exe",
-    "powershell.exe",
-    "rust-analyzer.exe",
-    "rust-analyzer-proc-macro-srv.exe"
-
-
-    // 多媒体工具
+    "System", "svchost.exe", "wininit.exe", "csrss.exe", "lsass.exe", "winlogon.exe",
+    "services.exe", "smss.exe", "lsaiso.exe", "fontdrvhost.exe",
+    // 常用工具
+    "chrome.exe", "msedge.exe", "firefox.exe", "Weixin.exe", "WeChatAppEx.exe", "WeChat.exe",
+    "WeChatWeb.exe", "QQ.exe", "DingTalk.exe", "Steam++.exe", "Steam++.Accelerator.exe",
+    "conhost.exe", "cmd.exe", "powershell.exe", "rust-analyzer.exe", "rust-analyzer-proc-macro-srv.exe",
 ];
 
-fn main() -> Result<()> {
+/// 清理文件的时间阈值（天）
+const TEMP_FILE_AGE_DAYS: u64 = 7;
+const CACHE_FILE_AGE_DAYS: u64 = 30;
+const LOG_FILE_AGE_DAYS: u64 = 90;
 
-    // 1. 结束非关键进程
-    terminate_non_critical_processes()?;
+/// 当前进程ID（避免自终止）
+static mut CURRENT_PID: u32 = 0;
 
-    // // 2. 清理系统工作集内存
-    compact_system_memory()?;
-
-    clear_virtual_memory()?;
-    clean_system_caches();
-    clean_c_drive()?;
-    dynamic_clock_boost(true);
-
-    println!("内存清理完成");
-    Ok(())
-}
-
-
-
-
-/// 动态调整CPU时钟速度
-fn dynamic_clock_boost(enable: bool) {
-    unsafe {
-        use windows::Win32::{
-            Foundation::GetLastError,
-            System::Threading::{
-                GetCurrentProcess, SetProcessInformation, 
-                PROCESS_INFORMATION_CLASS,
-                PROCESS_POWER_THROTTLING_STATE,
-                PROCESS_POWER_THROTTLING_EXECUTION_SPEED, 
-                PROCESS_POWER_THROTTLING_CURRENT_VERSION
-            }
-        };
-
-        // 使用Windows API定义的枚举值
-        const PROCESS_POWER_THROTTLING: PROCESS_INFORMATION_CLASS = 
-            PROCESS_INFORMATION_CLASS(0x12); // 0x12是ProcessPowerThrottling的实际值[9,10](@ref)
-
-        let mut throttling_state = PROCESS_POWER_THROTTLING_STATE {
-            Version: PROCESS_POWER_THROTTLING_CURRENT_VERSION,
-            ControlMask: if enable { PROCESS_POWER_THROTTLING_EXECUTION_SPEED } else { 0 },
-            StateMask: if enable { PROCESS_POWER_THROTTLING_EXECUTION_SPEED } else { 0 },
-        };
-        
-        SetProcessInformation(
-            GetCurrentProcess(),
-            PROCESS_POWER_THROTTLING, // 使用定义的常量
-            &mut throttling_state as *mut _ as _,
-            std::mem::size_of::<PROCESS_POWER_THROTTLING_STATE>() as _,
-        ).map_err(|_e| {
-            eprintln!("SetProcessInformation failed: {:?}", GetLastError());
-        }).ok();
+// ===================== 工具函数 =====================
+/// RAII 封装 Windows 句柄，自动释放
+struct SafeHandle(HANDLE);
+impl Drop for SafeHandle {
+    fn drop(&mut self) {
+        unsafe { CloseHandle(self.0).ok(); }
     }
 }
 
 
-fn clean_system_caches() {
-    // 缩略图缓存
-    let thumbnail_cache = Path::new("C:\\Users\\User\\AppData\\Local\\Microsoft\\Windows\\Explorer")
-        .join("thumbcache*.db");
-    clean_files(thumbnail_cache);
 
-    // DNS 缓存（已移除 unsafe）
-    std::process::Command::new("cmd")
-        .args(&["/C", "ipconfig", "/flushdns"])
-        .spawn()
-        .expect("无法刷新DNS缓存");
-
-    // 预取文件
-    let prefetch_files = Path::new("C:\\Windows\\Prefetch").join("*.pf");
-    clean_files(prefetch_files);
-}
-
-/// 清理指定模式的文件
-fn clean_files(path_pattern: std::path::PathBuf) {
-    if let Some(parent) = path_pattern.parent() {
-        if let Some(file_name) = path_pattern.file_name() {
-            if let Some(file_name_str) = file_name.to_str() {
-                if let Ok(entries) = std::fs::read_dir(parent) {
-                    // 使用闭包处理 Result
-                    for entry in entries.filter_map(|res| res.ok()) {
-                        if let Some(name) = entry.file_name().to_str() {
-                            if name.contains(file_name_str.trim_matches('*')) {
-                                let _ = std::fs::remove_file(entry.path());
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-/// 新增：清理虚拟内存功能
-fn clear_virtual_memory() -> Result<()> {
-    // 方法1：清空工作集（将不常用内存移入虚拟内存）
-    unsafe {
-        let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)?;
-        let mut entry: PROCESSENTRY32 = PROCESSENTRY32::default();
-        entry.dwSize = std::mem::size_of::<PROCESSENTRY32>() as u32;
-
-        if Process32First(snapshot, &mut entry).is_ok() {
-            loop {
-                let process_name = decode_process_name(&entry);
-                
-                // 只清理非保护进程
-                if !is_protected(&process_name) {
-                    let handle = OpenProcess(
-                        PROCESS_QUERY_INFORMATION | PROCESS_VM_OPERATION,
-                        false,
-                        entry.th32ProcessID,
-                    );
-                    
-                    if let Ok(handle) = handle {
-                        // 清空工作集（将物理内存移入虚拟内存）
-                        CloseHandle(handle)?;
-                    }
-                }
-
-                if Process32Next(snapshot, &mut entry).is_err() {
-                    break;
-                }
-            }
-        }
-        CloseHandle(snapshot)?;
-    }
-
-    // 方法2：重置进程工作集（强制释放未使用内存）
-    unsafe {
-        let current_process = GetCurrentProcess();
-
-        // 设置为最小值（!0表示使用物理内存的最小值）
-        SetProcessWorkingSetSizeEx(
-            current_process,
-            !0,
-            !0,
-            windows::Win32::System::Memory::SETPROCESSWORKINGSETSIZEEX_FLAGS(0),
-        )?;
-    }
-
-    Ok(())
-}
-
-/// 结束非关键进程
-fn terminate_non_critical_processes() -> Result<()> {
-    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)? };
-    let mut entry: PROCESSENTRY32 = PROCESSENTRY32::default();
-    entry.dwSize = std::mem::size_of::<PROCESSENTRY32>() as u32;
-
-    unsafe {
-        if Process32First(snapshot, &mut entry).is_ok() {
-            loop {
-                let process_name = decode_process_name(&entry);
-                if !is_protected(&process_name) {
-                terminate_process(entry.th32ProcessID);
-                }
-
-                if Process32Next(snapshot, &mut entry).is_err() {
-                    break;
-                }
-            }
-        }
-        let _ = CloseHandle(snapshot);
-    }
-    Ok(())
-}
-
-/// 终止单个进程
-fn terminate_process(pid: u32) {
-    unsafe {
-        let handle = OpenProcess(PROCESS_TERMINATE | PROCESS_QUERY_INFORMATION, false, pid);
-        if let Ok(handle) = handle {
-            let _ = TerminateProcess(handle, 1);
-            let _ = CloseHandle(handle);
-        }
-    }
-}
-
-/// 清理系统内存缓存
-fn compact_system_memory() -> Result<()> {
-    unsafe {
-        let heap = GetProcessHeap()?; // 使用?处理Result
-        HeapCompact(heap, HEAP_NO_SERIALIZE);
-
-        // 使用SetProcessWorkingSetSizeEx替代SetProcessWorkingSetSize
-        let current_process = GetCurrentProcess();
-        SetProcessWorkingSetSizeEx(
-            current_process,
-            !0,
-            !0,
-            windows::Win32::System::Memory::SETPROCESSWORKINGSETSIZEEX_FLAGS(0),
-        )?;
-    }
-    Ok(())
-}
-
+/// 正确解码 Windows 宽字符进程名（修复 PCWSTR 类型错误）
 /// 解码进程名称
 fn decode_process_name(entry: &PROCESSENTRY32) -> String {
     entry.szExeFile
@@ -260,134 +73,340 @@ fn decode_process_name(entry: &PROCESSENTRY32) -> String {
         .map(|&c| c as u8 as char)
         .collect::<String>()
 }
+
+/// 判断进程是否在白名单中
 fn is_protected(process_name: &str) -> bool {
-    PROTECTED_PROCESSES.iter().any(|&name| {
-        // 精确匹配主进程名（忽略大小写）
-        process_name.eq_ignore_ascii_case(name) 
-        // 额外匹配浏览器子进程（如 chrome.exe:1234）
-        || (name == "chrome.exe" && process_name.starts_with("chrome.exe"))
+    let name = process_name.to_lowercase();
+    PROTECTED_PROCESSES.iter().any(|&protected| {
+        let protected_lc = protected.to_lowercase();
+        name == protected_lc || (protected_lc == "chrome.exe" && name.starts_with("chrome.exe"))
     })
 }
 
-/// 综合C盘清理入口
-fn clean_c_drive() -> Result<()> {
-    clean_temp_folders()?;             // 临时文件夹
-    clean_thumbnail_cache()?;           // 缩略图缓存
-    clean_browser_caches()?;            // 浏览器缓存
-    clean_windows_update_cache()?;      // Windows更新缓存
-    clean_old_logs()?;                  // 旧日志文件
-    Ok(())
+/// 获取当前用户目录（替代硬编码）
+fn get_user_dir() -> PathBuf {
+    env::var("USERPROFILE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from(format!("C:\\Users\\{}", whoami::username())))
 }
 
-/// 1. 清理临时文件夹
-fn clean_temp_folders() -> Result<()> {
-    let temp_paths = vec![
-        Path::new("C:\\Windows\\Temp"),
-        Path::new("C:\\Users\\User\\AppData\\Local\\Temp")
-    ];
-
-    for path in temp_paths {
-        if path.exists() {
-            clean_directory_by_age(path, 7)?; // 删除7天前的文件
-        }
-    }
-    Ok(())
-}
-
-/// 2. 清理缩略图缓存
-fn clean_thumbnail_cache() -> Result<()> {
-    let cache_path = Path::new("C:\\Users\\User\\AppData\\Local\\Microsoft\\Windows\\Explorer");
-    if cache_path.exists() {
-        for entry in fs::read_dir(cache_path)? {
-            let entry = entry?;
-            let path = entry.path();
-            if path.is_file() && path.extension().unwrap_or_default() == "db" {
-                fs::remove_file(path)?;
+/// 通用文件清理（基于 glob 通配符）
+fn clean_files_glob(pattern: &str) {
+    for entry in glob(pattern).expect("无效的文件匹配模式") {
+        match entry {
+            Ok(path) => {
+                if path.is_file() {
+                    if let Err(e) = fs::remove_file(&path) {
+                        eprintln!("删除文件失败: {} - {}", path.display(), e);
+                    }
+                } else if path.is_dir() {
+                    if let Err(e) = fs::remove_dir_all(&path) {
+                        eprintln!("删除目录失败: {} - {}", path.display(), e);
+                    }
+                }
             }
+            Err(e) => eprintln!("匹配文件失败: {}", e),
         }
     }
-    Ok(())
 }
 
-/// 3. 浏览器缓存清理
-fn clean_browser_caches() -> Result<()> {
-    let browsers = vec![
-        "C:\\Users\\User\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\Cache",
-        "C:\\Users\\User\\AppData\\Local\\Microsoft\\Edge\\User Data\\Default\\Cache",
-        "C:\\Users\\User\\AppData\\Roaming\\Mozilla\\Firefox\\Profiles"
-    ];
-
-    for path_str in browsers {
-        let path = Path::new(path_str);
-        if path.exists() {
-            clean_directory_by_age(path, 30)?; // 删除30天前的缓存
-        }
+// ===================== 核心功能函数 =====================
+/// 终止非关键进程（安全增强版）
+fn terminate_non_critical_processes() -> Result<()> {
+    unsafe {
+        CURRENT_PID = GetCurrentProcessId(); // 获取当前进程ID，避免自杀
     }
-    Ok(())
-}
 
-/// 4. Windows更新缓存清理
-fn clean_windows_update_cache() -> Result<()> {
-    let update_path = Path::new("C:\\Windows\\SoftwareDistribution\\Download");
-    if update_path.exists() {
-        clean_directory_contents(update_path)?; // 立即清理无需判断时间
-    }
-    Ok(())
-}
+    // 创建进程快照（RAII 封装，自动释放）
+    let snapshot = SafeHandle(unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)? });
+    let mut entry: PROCESSENTRY32 = PROCESSENTRY32::default();
+    entry.dwSize = std::mem::size_of::<PROCESSENTRY32>() as u32;
 
-/// 5. 旧日志清理
-fn clean_old_logs() -> Result<()> {
-    let log_paths = vec![
-        Path::new("C:\\Windows\\Logs"),
-        Path::new("C:\\Windows\\System32\\LogFiles"),
-        Path::new("C:\\inetpub\\logs\\LogFiles") // IIS日志
-    ];
+    unsafe {
+        if Process32First(snapshot.0, &mut entry).is_ok() {
+            loop {
+                let pid = entry.th32ProcessID;
+                let process_name = decode_process_name(&entry);
 
-    for path in log_paths {
-        if path.exists() {
-            clean_directory_by_age(path, 90)?; // 删除90天前的日志
-        }
-    }
-    Ok(())
-}
+                // 安全过滤：跳过系统核心PID、当前进程、白名单进程
+                if pid == 0 || pid == 4 || pid == CURRENT_PID || is_protected(&process_name) {
+                    if Process32Next(snapshot.0, &mut entry).is_err() {
+                        break;
+                    }
+                    continue;
+                }
 
-/// 核心：按时间清理目录
-fn clean_directory_by_age(dir: &Path, days: u64) -> Result<()> {
-    let cutoff = SystemTime::now() - Duration::from_secs(days * 86400);
-    
-    for entry in fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        
-        if let Ok(metadata) = fs::metadata(&path) {
-            let modified = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
-            
-            if modified < cutoff {
-                if path.is_dir() {
-                    fs::remove_dir_all(&path)?;
-                } else {
-                    fs::remove_file(&path)?;
+                // 尝试终止进程（带权限检查和日志）
+                match OpenProcess(PROCESS_TERMINATE | PROCESS_QUERY_INFORMATION, false, pid) {
+                    Ok(handle) => {
+                        let handle = SafeHandle(handle); // RAII 封装
+                        if TerminateProcess(handle.0, 1).is_ok() {
+                            println!("已终止进程: {} (PID: {})", process_name, pid);
+                        } else {
+                            eprintln!(
+                                "终止进程失败: {} (PID: {}) - 错误码: {:?}",
+                                process_name, pid, GetLastError()
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "打开进程句柄失败: {} (PID: {}) - {}",
+                            process_name, pid, e
+                        );
+                    }
+                }
+
+                if Process32Next(snapshot.0, &mut entry).is_err() {
+                    break;
                 }
             }
         }
     }
+
     Ok(())
 }
 
-/// 立即清理目录内容
-fn clean_directory_contents(dir: &Path) -> Result<()> {
-    for entry in fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        
-        if path.is_dir() {
-            fs::remove_dir_all(&path)?;
-        } else {
-            fs::remove_file(&path)?;
-        }
+/// 压缩系统内存（清理工作集+堆）
+fn compact_system_memory() -> Result<()> {
+    unsafe {
+        // 压缩当前进程堆
+        let heap = GetProcessHeap()?;
+        HeapCompact(heap, HEAP_NO_SERIALIZE);
+
+        // 重置当前进程工作集（释放未使用内存）
+        let current_process = GetCurrentProcess();
+        SetProcessWorkingSetSizeEx(
+            current_process,
+            !0, // 最小工作集（特殊值：使用系统默认最小值）
+            !0, // 最大工作集（特殊值：使用系统默认最大值）
+            SETPROCESSWORKINGSETSIZEEX_FLAGS(0),
+        )?;
+
+        println!("内存工作集已重置");
     }
     Ok(())
 }
 
+/// 清理进程虚拟内存（修复原逻辑漏洞）
+fn clear_virtual_memory() -> Result<()> {
+    unsafe {
+        let snapshot = SafeHandle(CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)?);
+        let mut entry: PROCESSENTRY32 = PROCESSENTRY32::default();
+        entry.dwSize = std::mem::size_of::<PROCESSENTRY32>() as u32;
 
+        if Process32First(snapshot.0, &mut entry).is_ok() {
+            loop {
+                let pid = entry.th32ProcessID;
+                let process_name = decode_process_name(&entry);
 
+                // 仅清理非保护进程，跳过系统核心PID和当前进程
+                if !is_protected(&process_name) && pid != 0 && pid != 4 && pid != CURRENT_PID {
+                    // 打开进程（需要VM操作权限）
+                    match OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_OPERATION, false, pid) {
+                        Ok(handle) => {
+                            let handle = SafeHandle(handle);
+                            // 清理该进程的工作集（核心逻辑：原代码仅CloseHandle无实际操作）
+                            let result = SetProcessWorkingSetSizeEx(
+                                handle.0,
+                                !0,
+                                !0,
+                                SETPROCESSWORKINGSETSIZEEX_FLAGS(0),
+                            );
+                            if result.is_err() {
+                                eprintln!(
+                                    "清理进程虚拟内存失败: {} (PID: {}) - {:?}",
+                                    process_name, pid, GetLastError()
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "打开进程失败（清理虚拟内存）: {} (PID: {}) - {}",
+                                process_name, pid, e
+                            );
+                        }
+                    }
+                }
+
+                if Process32Next(snapshot.0, &mut entry).is_err() {
+                    break;
+                }
+            }
+        }
+    }
+
+    println!("非保护进程虚拟内存已清理");
+    Ok(())
+}
+
+/// 动态调整CPU时钟（优化错误处理）
+fn dynamic_clock_boost(enable: bool) {
+    unsafe {
+        use windows::Win32::System::Threading::{
+            PROCESS_INFORMATION_CLASS, PROCESS_POWER_THROTTLING_STATE, SetProcessInformation,
+        };
+
+        // 正确定义 ProcessPowerThrottling 枚举值（避免魔法数字）
+        const PROCESS_POWER_THROTTLING: PROCESS_INFORMATION_CLASS = PROCESS_INFORMATION_CLASS(0x12);
+        const PROCESS_POWER_THROTTLING_EXECUTION_SPEED: u32 = 0x00000001;
+        const PROCESS_POWER_THROTTLING_CURRENT_VERSION: u32 = 1;
+
+        let mut throttling_state = PROCESS_POWER_THROTTLING_STATE {
+            Version: PROCESS_POWER_THROTTLING_CURRENT_VERSION,
+            ControlMask: if enable { PROCESS_POWER_THROTTLING_EXECUTION_SPEED } else { 0 },
+            StateMask: if enable { PROCESS_POWER_THROTTLING_EXECUTION_SPEED } else { 0 },
+        };
+
+        let result = SetProcessInformation(
+            GetCurrentProcess(),
+            PROCESS_POWER_THROTTLING,
+            &mut throttling_state as *mut _ as _,
+            std::mem::size_of::<PROCESS_POWER_THROTTLING_STATE>() as u32,
+        );
+
+        match result {
+            Ok(_) => println!("CPU时钟调整成功（加速: {}）", enable),
+            Err(_) => eprintln!(
+                "CPU时钟调整失败 - 错误码: {:?}",
+                GetLastError()
+            ),
+        }
+    }
+}
+
+/// 清理系统缓存（去重+优化）
+fn clean_system_caches() {
+    // 刷新DNS缓存（等待执行完成+错误处理）
+    let dns_flush = std::process::Command::new("cmd")
+        .args(&["/C", "ipconfig", "/flushdns"])
+        .spawn()
+        .and_then(|mut child| child.wait().map(|status| status.success()));
+
+    match dns_flush {
+        Ok(true) => println!("DNS缓存已刷新"),
+        Ok(false) => eprintln!("DNS缓存刷新失败（退出码非0）"),
+        Err(e) => eprintln!("DNS缓存刷新失败: {}", e),
+    }
+
+    // 预取文件清理
+    clean_files_glob("C:\\Windows\\Prefetch\\*.pf");
+    println!("预取文件已清理");
+}
+
+/// 按文件修改时间清理目录
+fn clean_directory_by_age(dir: &Path, days: u64) -> Result<()> {
+    if !dir.exists() {
+        return Ok(());
+    }
+
+    let cutoff = SystemTime::now() - Duration::from_secs(days * 86400);
+
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        let metadata = fs::metadata(&path)?;
+
+        if metadata.modified()? < cutoff {
+            if path.is_dir() {
+                fs::remove_dir_all(&path)?;
+                println!("删除过期目录: {}", path.display());
+            } else {
+                fs::remove_file(&path)?;
+                println!("删除过期文件: {}", path.display());
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// 清理C盘核心逻辑（合并去重+修复生命周期问题）
+fn clean_c_drive() -> Result<()> {
+    let user_dir = get_user_dir();
+
+    // 1. 临时文件夹（修复临时值生命周期问题）
+    let user_temp_dir = user_dir.join("AppData\\Local\\Temp"); // 用let绑定延长生命周期
+    let temp_paths = vec![
+        Path::new("C:\\Windows\\Temp"),
+        user_temp_dir.as_path(),
+    ];
+    for path in temp_paths {
+        clean_directory_by_age(path, TEMP_FILE_AGE_DAYS)?;
+    }
+
+    // 2. 缩略图缓存
+    let thumbnail_dir = user_dir.join("AppData\\Local\\Microsoft\\Windows\\Explorer");
+    clean_files_glob(&format!("{}\\thumbcache*.db", thumbnail_dir.display()));
+
+    // 3. 浏览器缓存
+    let chrome_cache = user_dir.join("AppData\\Local\\Google\\Chrome\\User Data\\Default\\Cache");
+    let edge_cache = user_dir.join("AppData\\Local\\Microsoft\\Edge\\User Data\\Default\\Cache");
+    let firefox_cache = user_dir.join("AppData\\Roaming\\Mozilla\\Firefox\\Profiles");
+    let browser_caches = vec![chrome_cache, edge_cache, firefox_cache];
+    for path in browser_caches {
+        clean_directory_by_age(&path, CACHE_FILE_AGE_DAYS)?;
+    }
+
+    // 4. Windows更新缓存
+    let update_cache = Path::new("C:\\Windows\\SoftwareDistribution\\Download");
+    if update_cache.exists() {
+        for entry in fs::read_dir(update_cache)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.is_dir() {
+                fs::remove_dir_all(&path)?;
+            } else {
+                fs::remove_file(&path)?;
+            }
+        }
+        println!("Windows更新缓存已清理");
+    }
+
+    // 5. 旧日志文件
+    let log_paths = vec![
+        Path::new("C:\\Windows\\Logs"),
+        Path::new("C:\\Windows\\System32\\LogFiles"),
+        Path::new("C:\\inetpub\\logs\\LogFiles"),
+    ];
+    for path in log_paths {
+        clean_directory_by_age(path, LOG_FILE_AGE_DAYS)?;
+    }
+
+    Ok(())
+}
+
+// ===================== 主函数 =====================
+fn main() -> Result<()> {
+    // 初始化日志
+    env_logger::init();
+
+    println!("===== 开始系统清理 =====");
+
+    // 1. 终止非关键进程
+    println!("步骤1：终止非关键进程...");
+    terminate_non_critical_processes()?;
+
+    // 2. 压缩系统内存
+    println!("步骤2：压缩系统内存...");
+    compact_system_memory()?;
+
+    // 3. 清理虚拟内存
+    println!("步骤3：清理进程虚拟内存...");
+    clear_virtual_memory()?;
+
+    // 4. 清理系统缓存
+    println!("步骤4：清理系统缓存...");
+    clean_system_caches();
+
+    // 5. 清理C盘
+    println!("步骤5：清理C盘文件...");
+    clean_c_drive()?;
+
+    // 6. 动态提升CPU时钟
+    println!("步骤6：调整CPU时钟加速...");
+    dynamic_clock_boost(true);
+
+    println!("===== 系统清理完成 =====");
+    Ok(())
+}

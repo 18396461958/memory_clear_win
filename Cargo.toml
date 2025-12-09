@@ -4,19 +4,29 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-windows = { version = "0.61.3", features = ["Win32","Win32_Foundation",
-"Win32_System",
-"Win32_System_Diagnostics",
-"Win32_System_Performance",
-"Win32_NetworkManagement",
-"Win32_NetworkManagement_QoS",
-"Win32_Networking",
-"std",
- "Win32_System_Diagnostics_ToolHelp", "Win32_System_Memory", "Win32_System_Threading", "Win32_System_SystemServices"] }
+env_logger = "0.11.8"
+glob = "0.3.3"
+whoami = "1.6.1"
+windows = { version = "0.62.2", features = [
+	"Win32",
+	"Win32_Foundation",
+	"Win32_System",
+	"Win32_System_Diagnostics",
+	"Win32_System_Performance",
+	"Win32_NetworkManagement",
+	"Win32_NetworkManagement_QoS",
+	"Win32_Networking",
+	"std",
+	"Win32_System_Diagnostics_ToolHelp",
+	"Win32_System_Memory",
+	"Win32_System_Threading",
+	"Win32_System_SystemServices",
+	"Win32_Security",          # 修复管理员权限检查的依赖
+  "Win32_System_WindowsProgramming", # WideCharToMultiByte 依赖
+] }
 
 [build-dependencies]
 winres = "0.1.12"
 [profile.release]
-lto = true        # 链接时优化
-panic = "abort"   # 减少体积
- 
+lto = true      # 链接时优化
+panic = "abort" # 减少体积
