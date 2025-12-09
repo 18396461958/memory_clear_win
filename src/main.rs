@@ -7,7 +7,7 @@ use std::{
 
 use glob::glob;
 use windows::{
-    core::{Result, PCWSTR}, // 移除未使用的 HSTRING
+    core::Result, // 移除未使用的 HSTRING
     Win32::{
         Foundation::{CloseHandle, GetLastError, HANDLE},
         System::{
@@ -21,14 +21,8 @@ use windows::{
             },
             Threading::{
                 GetCurrentProcess, GetCurrentProcessId, OpenProcess, PROCESS_QUERY_INFORMATION,
-                PROCESS_TERMINATE, PROCESS_VM_OPERATION, TerminateProcess,
-                OpenProcessToken, // 补全导入
+                PROCESS_TERMINATE, PROCESS_VM_OPERATION, TerminateProcess, // 补全导入
             }
-        },
-        Security::{ // 补全 Security 模块导入
-            GetTokenInformation,
-            TokenElevation,
-            TOKEN_ACCESS_MASK,
         },
     },
 };
