@@ -32,7 +32,7 @@ use windows::{
 const PROTECTED_PROCESSES: &[&str] = &[
     // 系统核心进程
     "System", "svchost.exe", "wininit.exe", "csrss.exe", "lsass.exe", "winlogon.exe",
-    "services.exe", "smss.exe", "lsaiso.exe", "fontdrvhost.exe",
+    "services.exe", "smss.exe", "lsaiso.exe", "fontdrvhost.exe","Code.exe",
     // 常用工具
     "chrome.exe", "msedge.exe", "firefox.exe", "Weixin.exe", "WeChatAppEx.exe", "WeChat.exe",
     "WeChatWeb.exe", "QQ.exe", "DingTalk.exe", "Steam++.exe", "Steam++.Accelerator.exe",
