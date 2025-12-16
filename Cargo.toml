@@ -30,3 +30,19 @@ winres = "0.1.12"
 [profile.release]
 lto = true      # 链接时优化
 panic = "abort" # 减少体积
+
+[profile.release.package.env_logger]
+opt-level = 3     # 最高优化级别
+codegen-units = 1 # 单代码生成单元提升优化效果（牺牲编译速度）
+
+[profile.release.package.windows]
+opt-level = 3     # 最高优化级别
+codegen-units = 1 # 单代码生成单元提升优化效果（牺牲编译速度）
+
+[profile.release.package.whoami]
+opt-level = 3     # 最高优化级别
+codegen-units = 1 # 单代码生成单元提升优化效果（牺牲编译速度）
+
+[profile.release.package.glob]
+opt-level = 3     # 最高优化级别
+codegen-units = 1 # 单代码生成单元提升优化效果（牺牲编译速度）
