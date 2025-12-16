@@ -1,0 +1,150 @@
+name: Auto Update Dependencies
+
+on:
+  schedule:
+    # 每天 UTC 时间 16 点（北京时间凌晨 0 点）运行
+    - cron: '0 16 * * *'
+  workflow_dispatch:
+
+jobs:
+  update-deps:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # 添加写入权限
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
+        fetch-depth: 0
+
+    - name: Setup Rust Toolchain
+      uses: actions-rust-lang/setup-rust-toolchain@v1
+      with:
+        toolchain: stable
+        components: rustfmt, clippy
+
+    - name: Install cargo-edit
+      run: cargo install cargo-edit cargo-outdated
+
+    - name: Get current package info
+      id: package-info
+      run: |
+        # 获取当前版本
+        CURRENT_VERSION=$(grep -E '^version =' Cargo.toml | cut -d '"' -f2)
+        echo "current_version=$CURRENT_VERSION" >> $GITHUB_OUTPUT
+        echo "当前版本: $CURRENT_VERSION"
+
+    - name: Check for updates
+      id: check-updates
+      run: |
+        # 检查可用的更新
+        echo "=== 检查可用更新 ==="
+        cargo outdated
+        
+        # 应用更新（只更新 minor 和 patch 版本）
+        echo "=== 应用更新 ==="
+        cargo upgrade
+        
+        # 检查是否有文件变化，并处理可能的空输出
+        if git diff --name-only HEAD -- Cargo.toml Cargo.lock | grep -q 'Cargo.toml\|Cargo.lock'; then
+          echo "有依赖更新，开始处理..."
+          
+          echo "=== 生成更新报告 ==="
+          # 运行 cargo outdated 并检查是否成功
+          if cargo outdated --format json > outdated.json 2>/dev/null; then
+            # 检查生成的JSON文件是否有效且非空
+            if [[ -s outdated.json ]] && [[ $(cat outdated.json) != "null" ]]; then
+              # 使用更安全的jq查询，处理可能的空值
+              UPDATE_LOG=$(jq -r '
+                if .dependencies != null and .dev_dependencies != null then
+                  ("依赖更新报告:\n",
+                  (.dependencies[]? | select(.project != .latest) | "- \(.name): \(.project) → \(.latest)"),
+                  (.dev_dependencies[]? | select(.project != .latest) | "- \(.name) (dev): \(.project) → \(.latest)"))
+                elif .dependencies != null then
+                  ("依赖更新报告:\n",
+                  (.dependencies[]? | select(.project != .latest) | "- \(.name): \(.project) → \(.latest)"))
+                elif .dev_dependencies != null then
+                  ("依赖更新报告:\n",
+                  (.dev_dependencies[]? | select(.project != .latest) | "- \(.name) (dev): \(.project) → \(.latest)"))
+                else
+                  "依赖更新报告:\n暂无详细更新信息"
+                end
+              ' outdated.json 2>/dev/null || echo "依赖更新报告:\n更新详情解析失败")
+              
+              # 计算更新数量
+              UPDATED_COUNT=$(jq '[.dependencies[]?, .dev_dependencies[]?] | map(select(.project != .latest)) | length' outdated.json 2>/dev/null || echo "0")
+            else
+              UPDATE_LOG="依赖更新报告:\nJSON输出为空或无效"
+              UPDATED_COUNT=0
+            fi
+          else
+            UPDATE_LOG="依赖更新报告:\n无法生成更新报告"
+            UPDATED_COUNT=0
+          fi
+          
+          # 设置默认值（如果上面的命令失败）
+          UPDATE_LOG=${UPDATE_LOG:-"依赖更新报告:\n无法生成详细报告"}
+          UPDATED_COUNT=${UPDATED_COUNT:-0}
+          
+          echo "更新包数量: $UPDATED_COUNT"
+          echo "更新详情: $UPDATE_LOG"
+          
+          # 设置输出变量
+          echo "updated_count=$UPDATED_COUNT" >> $GITHUB_OUTPUT
+          echo "update_log<<EOF" >> $GITHUB_OUTPUT
+          echo "$UPDATE_LOG" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+          echo "has_updates=true" >> $GITHUB_OUTPUT
+        else
+          echo "没有可用的依赖更新"
+          echo "has_updates=false" >> $GITHUB_OUTPUT
+          echo "updated_count=0" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Bump version if updates available
+      if: steps.check-updates.outputs.has_updates == 'true'
+      run: |
+        # 获取当前版本
+        CURRENT_VERSION="${{ steps.package-info.outputs.current_version }}"
+        echo "当前版本: $CURRENT_VERSION"
+        
+        # 解析版本号并增加 0.0.1
+        IFS='.' read -r major minor patch <<< "$CURRENT_VERSION"
+        new_patch=$((patch + 1))
+        NEW_VERSION="$major.$minor.$new_patch"
+        
+        echo "新版本: $NEW_VERSION"
+        
+        # 更新 Cargo.toml 中的版本号
+        sed -i "s/^version = \".*\"$/version = \"$NEW_VERSION\"/" Cargo.toml
+        
+        echo "版本号已更新为: $NEW_VERSION"
+
+    - name: Commit changes to main branch
+      if: steps.check-updates.outputs.has_updates == 'true'
+      run: |
+        # 配置 git 用户
+        git config --local user.email "action@github.com"
+        git config --local user.name "GitHub Action"
+        
+        # 添加更改的文件
+        git add Cargo.toml Cargo.lock
+        
+        # 提交更改
+        git commit -m "chore(deps): 自动更新 ${{ steps.check-updates.outputs.updated_count }} 个依赖包
+        
+        ${{ steps.check-updates.outputs.update_log }}
+        
+        版本号: ${{ steps.package-info.outputs.current_version }} → $(grep -E '^version =' Cargo.toml | cut -d '"' -f2)
+        更新时间: $(date +"%Y-%m-%d %H:%M:%S")"
+        
+        # 推送到主分支
+        git push origin main
+
+    - name: No updates message
+      if: steps.check-updates.outputs.has_updates == 'false'
+      run: |
+        echo "所有依赖包都是最新版本，无需更新"
+        echo "当前版本: ${{ steps.package-info.outputs.current_version }}"

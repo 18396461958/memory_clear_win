@@ -1,0 +1,138 @@
+name: Rust build Release
+
+on:
+  schedule:
+    - cron: '0 17 * * *'  # UTC时间17点（北京时间1点）
+  workflow_dispatch:      # 允许手动触发
+  push:
+    tags:
+      - 'v*'            # 当推送v开头的标签时触发
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    
+    steps:
+    - name: Checkout latest code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0  # 获取完整历史记录
+        token: ${{ secrets.GITHUB_TOKEN }}  # 需要这个来推送更改
+
+    - name: Install musl tools
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y musl-tools
+    
+    - name: Get current date and time
+      id: datetime
+      run: |
+        echo "date=$(date +'%Y%m%d-%H%M%S')" >> $GITHUB_OUTPUT
+        echo "iso_date=$(date -u +"%Y-%m-%dT%H:%M:%SZ")" >> $GITHUB_OUTPUT
+    
+    - name: Install Rust
+      uses: actions-rust-lang/setup-rust-toolchain@v1
+    
+    - name: Install x86_64-unknown-linux-musl
+      run: rustup target add x86_64-unknown-linux-musl
+
+    - name: Set up environment for musl build
+      run: |
+        export CC=musl-gcc
+        export AR=ar
+        export RUSTFLAGS="-C target-feature=-crt-static"
+    
+    - name: Install cross
+      run: cargo install cross
+
+    - name: Build release binary
+      run: cross build --release --target x86_64-unknown-linux-musl
+    
+    - name: Get current version from Cargo.toml
+      id: get_current_version
+      run: |
+        CURRENT_VERSION=$(grep '^version' Cargo.toml | head -1 | cut -d '"' -f2)
+        echo "current_version=$CURRENT_VERSION" >> $GITHUB_OUTPUT
+        echo "当前版本: $CURRENT_VERSION"
+    
+    - name: Bump version (only for schedule and workflow_dispatch)
+      if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+      id: bump_version
+      run: |
+        # 获取当前版本
+        CURRENT_VERSION=$(grep '^version' Cargo.toml | head -1 | cut -d '"' -f2)
+        echo "当前版本: $CURRENT_VERSION"
+        
+        # 解析版本号并增加 0.01
+        IFS='.' read -r major minor patch <<< "$CURRENT_VERSION"
+        minor=$((minor + 1))
+        NEW_VERSION="$major.$minor.$patch"
+        echo "新版本: $NEW_VERSION"
+        
+        # 更新 Cargo.toml
+        sed -i "s/^version = \"$CURRENT_VERSION\"/version = \"$NEW_VERSION\"/" Cargo.toml
+        
+        # 验证更新
+        echo "更新后的版本: $(grep '^version' Cargo.toml | head -1)"
+        
+        # 输出新版本
+        echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
+    
+    - name: Commit version bump (only for schedule and workflow_dispatch)
+      if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+      run: |
+        git config --local user.email "action@github.com"
+        git config --local user.name "GitHub Action"
+        git add Cargo.toml
+        git commit -m "Bump version to ${{ steps.bump_version.outputs.new_version }} [skip ci]"
+        git push
+    
+    - name: Get final version for release
+      id: get_final_version
+      run: |
+        if [[ "${{ github.event_name }}" == "push" && "${{ github.ref }}" == refs/tags/v* ]]; then
+          # 标签触发时，使用标签中的版本号
+          VERSION=${GITHUB_REF#refs/tags/v}
+        else
+          # 其他情况使用 Cargo.toml 中的版本号
+          VERSION=$(grep '^version' Cargo.toml | head -1 | cut -d '"' -f2)
+        fi
+        echo "version=$VERSION" >> $GITHUB_OUTPUT
+        echo "发布版本: $VERSION"
+    
+    - name: Determine release type and tag
+      id: release_info
+      run: |
+        if [[ "${{ github.event_name }}" == "push" && "${{ github.ref }}" == refs/tags/v* ]]; then
+          echo "RELEASE_TYPE=stable" >> $GITHUB_OUTPUT
+          echo "TAG_NAME=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+          echo "RELEASE_NAME=Release ${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+          echo "PRERELEASE=false" >> $GITHUB_OUTPUT
+        else
+          echo "RELEASE_TYPE=nightly" >> $GITHUB_OUTPUT
+          echo "TAG_NAME=nightly-${{ steps.datetime.outputs.date }}" >> $GITHUB_OUTPUT
+          echo "RELEASE_NAME=Nightly Build (${{ steps.get_final_version.outputs.version }})" >> $GITHUB_OUTPUT
+          echo "PRERELEASE=true" >> $GITHUB_OUTPUT
+        fi
+    
+    - name: Create Release
+      uses: softprops/action-gh-release@v1
+      with:
+        tag_name: ${{ steps.release_info.outputs.TAG_NAME }}
+        release_name: ${{ steps.release_info.outputs.RELEASE_NAME }}
+        body: |
+          ${{ steps.release_info.outputs.RELEASE_TYPE == 'stable' && '稳定版本发布' || '自动构建的夜间版本' }}
+          版本: ${{ steps.get_final_version.outputs.version }}
+          构建时间: ${{ steps.datetime.outputs.iso_date }}
+          提交: ${{ github.sha }}
+        draft: false
+        prerelease: ${{ steps.release_info.outputs.PRERELEASE }}
+        files: |
+          target/x86_64-unknown-linux-musl/release/*
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
