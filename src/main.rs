@@ -34,7 +34,7 @@ const PROTECTED_PROCESSES: &[&str] = &[
     "System", "svchost.exe", "wininit.exe", "csrss.exe", "lsass.exe", "winlogon.exe",
     "services.exe", "smss.exe", "lsaiso.exe", "fontdrvhost.exe","Code.exe","Eye Nurse 2.exe",
     // 常用工具
-    "msedge.exe", "firefox.exe", "Weixin.exe", "WeChatAppEx.exe", "WeChat.exe",
+    "msedge.exe", "firefox.exe", "Weixin.exe", "WeChatAppEx.exe", "WeChat.exe","RustDesk.exe",
     "WeChatWeb.exe", "QQ.exe", "DingTalk.exe", "Steam++.exe", "Steam++.Accelerator.exe",
     "conhost.exe", "cmd.exe", "powershell.exe", "rust-analyzer.exe", "rust-analyzer-proc-macro-srv.exe",
 ];
